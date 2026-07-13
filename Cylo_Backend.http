@@ -1,0 +1,14 @@
+@RootUrl = http://localhost:5078
+
+GET {{RootUrl}}/weatherforecast/
+Accept: application/json
+
+###
+POST {{RootUrl}}/api/Auth/register
+Accept: application/json
+Content-Type: application/json
+{
+    "username": "testuser",
+    "email": "sipho@gmail.com",
+    "password": "testpassword"
+}
