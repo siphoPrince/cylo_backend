@@ -20,8 +20,9 @@ builder.Services.AddHttpClient<TradeSafeService>();
 
 // Database - Automatically picks Dev or Prod connection strings based on the active environment file
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"),
-    sqlOptions => sqlOptions.EnableRetryOnFailure(
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("DefaultConnection"),
+        sqlOptions => sqlOptions.EnableRetryOnFailure(
             maxRetryCount: 5,
             maxRetryDelay: TimeSpan.FromSeconds(30),
             errorNumbersToAdd: null
@@ -35,6 +36,7 @@ var s3Config = new AmazonS3Config
     ServiceURL = $"https://{r2Config["AccountId"]}.r2.cloudflarestorage.com",
     ForcePathStyle = true
 };
+
 builder.Services.AddSingleton<IAmazonS3>(new AmazonS3Client(
     r2Config["AccessKey"],
     r2Config["SecretKey"],
@@ -109,8 +111,8 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowFrontend", policy =>
     {
         policy.WithOrigins(
-                   "http://localhost:5173",
-                   "http://localhost:51817",
+                  "http://localhost:5173",
+                  "http://localhost:51817",
                   "http://localhost:5078",
                   "http://localhost:5000",
                   "https://localhost:7124",
@@ -156,19 +158,14 @@ else
     // Production settings: Hides swagger endpoints from public scanning
     app.UseExceptionHandler("/Error");
     app.UseHsts();
-
     //app.UseHttpsRedirection();
 }
 
-
 app.UseStaticFiles();
-
 app.UseRouting();
 app.UseCors("AllowFrontend");
-
 app.UseAuthentication();
 app.UseAuthorization();
-
 app.MapControllers();
 app.MapHub<ChatHub>("/chatHub");
 app.MapFallbackToFile("index.html", new StaticFileOptions
@@ -176,7 +173,7 @@ app.MapFallbackToFile("index.html", new StaticFileOptions
     // Alternatively, map fallback only if the path does not start with /api
 });
 
-// 🚀 CLEAN AUTOMATIC DATABASE SCHEMA GENERATION
+// 🚀 CLEAN AUTOMATIC DATABASE SCHEMA MIGRATION
 using (var scope = app.Services.CreateScope())
 {
     var services = scope.ServiceProvider;
@@ -184,72 +181,13 @@ using (var scope = app.Services.CreateScope())
     {
         var dbContext = services.GetRequiredService<ApplicationDbContext>();
 
-        // --- 1. NOTIFICATIONS TABLE ---
-        var fixNotificationsSql = @"
-            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Notifications')
-            BEGIN
-                CREATE TABLE Notifications (
-                    Id INT IDENTITY(1,1) PRIMARY KEY,
-                    UserId INT NOT NULL,
-                    Type NVARCHAR(50) NOT NULL,
-                    IsRead BIT NOT NULL DEFAULT 0,
-                    CreatedAt DATETIME2 NOT NULL DEFAULT GETDATE()
-                );
-            END";
-        dbContext.Database.ExecuteSqlRaw(fixNotificationsSql);
-
-        // --- 2. LIKES TABLE ---
-        var fixLikesSql = @"
-            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Likes')
-            BEGIN
-                CREATE TABLE Likes (
-                    Id INT IDENTITY(1,1) PRIMARY KEY,
-                    PostId INT NOT NULL,
-                    UserId INT NOT NULL,
-                    CreatedAt DATETIME2 NOT NULL DEFAULT GETDATE(),
-                    CONSTRAINT UC_Like_User_Post UNIQUE (PostId, UserId)
-                );
-            END";
-        dbContext.Database.ExecuteSqlRaw(fixLikesSql);
-
-        // --- 3. COMMENTS TABLE ---
-        var fixCommentsSql = @"
-            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'Comments')
-            BEGIN
-                CREATE TABLE Comments (
-                    Id INT IDENTITY(1,1) PRIMARY KEY,
-                    Content NVARCHAR(MAX) NOT NULL,
-                    PostId INT NOT NULL,
-                    UserId INT NOT NULL,
-                    ParentCommentId INT NULL,
-                    CreatedAt DATETIME2 NOT NULL DEFAULT GETDATE(),
-                    CommentsId INT NULL
-                );
-            END";
-        dbContext.Database.ExecuteSqlRaw(fixCommentsSql);
-
-        // --- 4. COMMENT LIKES TABLE ---
-        var fixCommentLikesSql = @"
-            IF NOT EXISTS (SELECT * FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'CommentLikes')
-            BEGIN
-                CREATE TABLE CommentLikes (
-                    Id INT IDENTITY(1,1) PRIMARY KEY,
-                    CommentId INT NOT NULL,
-                    UserId INT NOT NULL,
-                    CONSTRAINT UC_CommentLike_User_Comment UNIQUE (CommentId, UserId),
-                    CommentsId INT NULL
-                );
-            END";
-        dbContext.Database.ExecuteSqlRaw(fixCommentLikesSql);
-
-        // Only run full migrations automatically if we're working locally, 
-        // or ensure your live DB user has strict DDL privileges if executing in prod.
+        // Let EF Core handle schema creation in sequence using migration history
         dbContext.Database.Migrate();
     }
     catch (Exception ex)
     {
         var logger = services.GetRequiredService<ILogger<Program>>();
-        logger.LogError(ex, "An error occurred while building the clean database.");
+        logger.LogError(ex, "An error occurred while running database migrations.");
     }
 }
 
