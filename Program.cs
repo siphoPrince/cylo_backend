@@ -11,12 +11,16 @@ using System.Globalization;
 using Amazon.S3;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddMemoryCache();
 
 // --- 1. Services Configuration ---
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddHttpClient<IPaystackService, PaystackService>();
+builder.Services.AddHttpClient<IPicupService, PicupService>();
 builder.Services.AddHttpClient<TradeSafeService>();
+builder.Services.AddHttpClient<IUberDirectService, UberDirectService>();
 
 // Database - Automatically picks Dev or Prod connection strings based on the active environment file
 builder.Services.AddDbContext<ApplicationDbContext>(options =>

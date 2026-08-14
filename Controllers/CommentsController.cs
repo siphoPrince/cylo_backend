@@ -18,7 +18,6 @@ namespace Cylo_Backend.Controllers
             _context = context;
         }
 
-        // --- DTOs ---
         public class CommentCreateDto
         {
             public string Content { get; set; } = string.Empty;
@@ -31,21 +30,19 @@ namespace Cylo_Backend.Controllers
             public string Content { get; set; } = string.Empty;
         }
 
-        // Helper to safely parse user ID from token
         private int? GetCurrentUserId()
         {
             var claimId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (int.TryParse(claimId, out int userId)) return userId;
-            return null;
+            return int.TryParse(claimId, out int userId) ? userId : null;
         }
 
-        // --- GET ALL COMMENTS FOR A POST ---
         [HttpGet("post/{postId}")]
         public async Task<IActionResult> GetCommentsForPost(int postId)
         {
             var currentUserId = GetCurrentUserId();
 
             var response = await _context.Comments
+                .AsNoTracking()
                 .Where(c => c.PostId == postId)
                 .OrderByDescending(c => c.CreatedAt)
                 .Select(c => new
@@ -56,31 +53,26 @@ namespace Cylo_Backend.Controllers
                     postId = c.PostId,
                     userId = c.UserId,
                     parentCommentId = c.ParentCommentId,
-
-                    // Explicit conditional expressions translate perfectly to SQL CASE statements
                     handleName = c.User != null && c.User.Profile != null && c.User.Profile.HandleName != null
                         ? c.User.Profile.HandleName
                         : "user",
-
                     profilePictureUrl = c.User != null && c.User.Profile != null && c.User.Profile.ImageUrl != null
                         ? c.User.Profile.ImageUrl
                         : "",
-
-                    likesCount = _context.CommentLikes.Count(l => l.CommentId == c.Id),
-                    isLikedByMe = currentUserId.HasValue && _context.CommentLikes.Any(l => l.CommentId == c.Id && l.UserId == currentUserId.Value)
+                    likesCount = c.CommentLikes.Count,
+                    isLikedByMe = currentUserId.HasValue && c.CommentLikes.Any(l => l.UserId == currentUserId.Value)
                 })
                 .ToListAsync();
 
             return Ok(response);
         }
-        // POST: api/Comments
+
         [Authorize]
         [HttpPost]
         public async Task<IActionResult> PostComment([FromBody] CommentCreateDto dto)
         {
             var currentUserId = GetCurrentUserId();
             if (currentUserId == null) return Unauthorized("Invalid token identity.");
-
             if (string.IsNullOrWhiteSpace(dto.Content)) return BadRequest("Content cannot be empty.");
 
             var postExists = await _context.Posts.AnyAsync(p => p.Id == dto.PostId);
@@ -88,11 +80,21 @@ namespace Cylo_Backend.Controllers
 
             if (dto.ParentCommentId.HasValue)
             {
-                var parentExists = await _context.Comments.AnyAsync(c => c.Id == dto.ParentCommentId.Value);
-                if (!parentExists) return BadRequest("The parent comment you are replying to does not exist.");
+                var parentComment = await _context.Comments.FirstOrDefaultAsync(c => c.Id == dto.ParentCommentId.Value);
+                if (parentComment == null) return BadRequest("The parent comment does not exist.");
+                if (parentComment.PostId != dto.PostId) return BadRequest("Parent comment belongs to a different post.");
             }
 
-            var comment = new Comments // Ensure this matches your actual entity name syntax
+            var userProfile = await _context.Users
+                .AsNoTracking()
+                .Where(u => u.Id == currentUserId.Value)
+                .Select(u => new {
+                    HandleName = u.Profile != null ? u.Profile.HandleName : "user",
+                    ImageUrl = u.Profile != null ? u.Profile.ImageUrl : ""
+                })
+                .FirstOrDefaultAsync();
+
+            var comment = new Comments
             {
                 Content = dto.Content,
                 PostId = dto.PostId,
@@ -104,24 +106,16 @@ namespace Cylo_Backend.Controllers
             _context.Comments.Add(comment);
             await _context.SaveChangesAsync();
 
-            // Fetch relations dynamically to construct the return response payload
-            var savedComment = await _context.Comments
-                .Include(c => c.User)
-                    .ThenInclude(u => u.Profile)
-                .FirstOrDefaultAsync(c => c.Id == comment.Id);
-
-            if (savedComment == null) return StatusCode(500, "Error saving comment.");
-
             var response = new
             {
-                id = savedComment.Id,
-                content = savedComment.Content,
-                createdAt = savedComment.CreatedAt,
-                postId = savedComment.PostId,
-                userId = savedComment.UserId,
-                parentCommentId = savedComment.ParentCommentId,
-                handleName = savedComment.User?.Profile?.HandleName ?? "user",
-                profilePictureUrl = savedComment.User?.Profile?.ImageUrl ?? "",
+                id = comment.Id,
+                content = comment.Content,
+                createdAt = comment.CreatedAt,
+                postId = comment.PostId,
+                userId = comment.UserId,
+                parentCommentId = comment.ParentCommentId,
+                handleName = userProfile?.HandleName ?? "user",
+                profilePictureUrl = userProfile?.ImageUrl ?? "",
                 likesCount = 0,
                 isLikedByMe = false
             };
@@ -137,11 +131,9 @@ namespace Cylo_Backend.Controllers
                 .FirstOrDefaultAsync(c => c.Id == id);
 
             if (comment == null) return NotFound();
-            
             return Ok(comment);
         }
 
-        // PUT: api/Comments/{id}
         [Authorize]
         [HttpPut("{id}")]
         public async Task<IActionResult> UpdateComment(int id, [FromBody] CommentUpdateDto dto)
@@ -151,6 +143,7 @@ namespace Cylo_Backend.Controllers
 
             if (comment == null) return NotFound();
             if (comment.UserId != currentUserId) return Forbid();
+            if (comment.Content == "This comment was deleted.") return BadRequest("Cannot edit a deleted comment.");
             if (string.IsNullOrWhiteSpace(dto.Content)) return BadRequest("Content cannot be empty.");
 
             comment.Content = dto.Content;
@@ -159,33 +152,34 @@ namespace Cylo_Backend.Controllers
             return Ok(new { id = comment.Id, content = comment.Content });
         }
 
-        // DELETE: api/Comments/{id}
         [Authorize]
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteComment(int id)
         {
             var currentUserId = GetCurrentUserId();
             var comment = await _context.Comments
-                .Include(c => c.Replies) 
+                .Include(c => c.Replies)
                 .FirstOrDefaultAsync(c => c.Id == id);
 
             if (comment == null) return NotFound();
             if (comment.UserId != currentUserId) return Forbid();
 
-            // Handle Soft Delete gracefully if comment has sub-replies nested underneath it
+            bool isSoftDeleted = false;
+
             if (comment.Replies != null && comment.Replies.Any())
             {
                 comment.Content = "This comment was deleted.";
-                await _context.SaveChangesAsync();
-                return Ok(new { id = comment.Id, isSoftDeleted = true });
+                isSoftDeleted = true;
+            }
+            else
+            {
+                _context.Comments.Remove(comment);
             }
 
-            _context.Comments.Remove(comment);
             await _context.SaveChangesAsync();
-            return NoContent();
+            return Ok(new { id = id, isSoftDeleted = isSoftDeleted });
         }
 
-        // POST: api/Comments/{id}/like
         [Authorize]
         [HttpPost("{id}/like")]
         public async Task<IActionResult> ToggleLikeComment(int id)
@@ -208,16 +202,24 @@ namespace Cylo_Backend.Controllers
             }
             else
             {
-                var commentLike = new CommentLike 
+                _context.CommentLikes.Add(new CommentLike
                 {
                     CommentId = id,
                     UserId = currentUserId.Value
-                };
-                _context.CommentLikes.Add(commentLike);
+                });
                 isLikedByMe = true;
             }
 
-            await _context.SaveChangesAsync();
+            try
+            {
+                await _context.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // Handles concurrent rapid-click race conditions cleanly
+                isLikedByMe = await _context.CommentLikes.AnyAsync(l => l.CommentId == id && l.UserId == currentUserId.Value);
+            }
+
             var directLikesCount = await _context.CommentLikes.CountAsync(l => l.CommentId == id);
             return Ok(new { isLiked = isLikedByMe, likesCount = directLikesCount });
         }

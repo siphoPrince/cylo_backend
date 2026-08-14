@@ -9,7 +9,7 @@ namespace Cylo_Backend.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
-    public class LikesController : ControllerBase // Changed to ControllerBase since this is an API
+    public class LikesController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
 
@@ -30,7 +30,7 @@ namespace Cylo_Backend.Controllers
                 return BadRequest("Invalid User ID format");
             }
 
-            // 1. Fetch the post directly to let EF map the properties and update the columns safely
+            // 1. Fetch the post directly
             var post = await _context.Posts.FirstOrDefaultAsync(p => p.Id == postId);
             if (post == null) return NotFound("Post not found");
 
@@ -40,42 +40,29 @@ namespace Cylo_Backend.Controllers
 
             bool isLikedNow;
 
-            using var transaction = await _context.Database.BeginTransactionAsync();
-            try
+            if (existingLike != null)
             {
-                if (existingLike != null)
-                {
-                    _context.Likes.Remove(existingLike);
-                    isLikedNow = false;
+                _context.Likes.Remove(existingLike);
+                isLikedNow = false;
 
-                    // Safe update using EF properties directly instead of raw SQL strings
-                    post.LikeCount = Math.Max(0, post.LikeCount - 1);
-                }
-                else
-                {
-                    var newLike = new Like
-                    {
-                        PostId = postId,
-                        UserId = userId
-                    };
-                    _context.Likes.Add(newLike);
-                    isLikedNow = true;
-
-                    post.LikeCount += 1;
-                }
-
-                // Save everything inside the atomic transaction block safely
-                await _context.SaveChangesAsync();
-                await transaction.CommitAsync();
+                post.LikeCount = Math.Max(0, post.LikeCount - 1);
             }
-            catch (Exception ex)
+            else
             {
-                await transaction.RollbackAsync();
+                var newLike = new Like
+                {
+                    PostId = postId,
+                    UserId = userId,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _context.Likes.Add(newLike);
+                isLikedNow = true;
 
-                // This will display the exact column naming mismatch if the database fails here!
-                var deepError = ex.InnerException != null ? ex.InnerException.Message : ex.Message;
-                return StatusCode(500, new { message = "Like transaction failed", details = deepError });
+                post.LikeCount += 1;
             }
+
+            // EF Core executes both the Like table change and Post table update atomically
+            await _context.SaveChangesAsync();
 
             return Ok(new { isLiked = isLikedNow, likeCount = post.LikeCount });
         }
